@@ -1476,3 +1476,6 @@ TAI_0050_TICKER = [
     "1102",  # Asia Cement Corporation
     "9933",  # Mega Financial Holding Co., Ltd.
 ]
+
+
+
