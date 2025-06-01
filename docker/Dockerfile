@@ -20,6 +20,7 @@ RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && \
 
 RUN python3 -m pip install --break-system-packages -vvv -r requirements.txt -I
 RUN python3 -m pip install --break-system-packages jupyterlab
+RUN python3 -m pip install --break-system-packages pytest
 
 # Add Tini. Tini operates as a process subreaper for jupyter. This prevents kernel crashes.
 ENV TINI_VERSION=v0.6.0
