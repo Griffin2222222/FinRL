@@ -1,2 +1,6 @@
 numpy
 pandas
+gymnasium
+gym
+scikit-learn
+yfinance
