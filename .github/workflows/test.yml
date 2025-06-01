@@ -1,6 +1,11 @@
 name: Run Tests!
 
 on:
+  push:
+    branches:
+      - main
+      - master
+      - dev
   schedule:
     - cron: "0 6 * * *"
 
