@@ -6,3 +6,4 @@ scikit-learn
 yfinance
 matplotlib
 stockstats
+stable-baselines3[extra]
