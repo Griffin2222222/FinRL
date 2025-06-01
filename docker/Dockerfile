@@ -6,8 +6,8 @@ COPY requirements.txt .
 
 USER root
 RUN apt-get update && apt-get install -y python3-pip
-RUN python3 -m pip install -r requirements.txt -I
-RUN python3 -m pip install jupyterlab
+RUN python3 -m pip install --break-system-packages -r requirements.txt -I
+RUN python3 -m pip install --break-system-packages jupyterlab
 
 # Add Tini. Tini operates as a process subreaper for jupyter. This prevents kernel crashes.
 ENV TINI_VERSION v0.6.0
