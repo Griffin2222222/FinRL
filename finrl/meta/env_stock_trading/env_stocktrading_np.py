@@ -3,13 +3,12 @@ from __future__ import annotations
 import gymnasium as gym
 import numpy as np
 from numpy import random as rd
-
+from finrl.feature_engineering.contextual_reward import gpt_contextual_reward
 
 class StockTradingEnv(gym.Env):
     def __init__(
         self,
         config,
-        initial_account=1e6,
         gamma=0.99,
         turbulence_thresh=99,
         min_stock_rate=0.1,
@@ -19,7 +18,16 @@ class StockTradingEnv(gym.Env):
         sell_cost_pct=1e-3,
         reward_scaling=2**-11,
         initial_stocks=None,
+        stoploss_pct=0.05,  # 5% stoploss
+        slippage_pct=0.001,  # 0.1% slippage
+        latency_steps=1,     # 1 step latency
+        volatility_window=20, # for dynamic risk exposure
+        max_volatility=0.03,  # max allowed volatility for full exposure
+        min_exposure=0.2,     # min exposure at high volatility
+        black_swan_thresh=0.15, # 15% drop in one step triggers capital preservation
     ):
+        self.macro_context = getattr(config, "macro_context", "")  # or pass as config["macro_context"]
+        self.gpt_client = getattr(config, "gpt_client", None)      # or pass as config["gpt_client"]
         price_ary = config["price_array"]
         tech_ary = config["tech_array"]
         turbulence_ary = config["turbulence_array"]
@@ -48,6 +56,15 @@ class StockTradingEnv(gym.Env):
             else initial_stocks
         )
 
+        # Advanced features
+        self.stoploss_pct = stoploss_pct
+        self.slippage_pct = slippage_pct
+        self.latency_steps = latency_steps
+        self.volatility_window = volatility_window
+        self.max_volatility = max_volatility
+        self.min_exposure = min_exposure
+        self.black_swan_thresh = black_swan_thresh
+
         # reset()
         self.day = None
         self.amount = None
@@ -56,12 +73,15 @@ class StockTradingEnv(gym.Env):
         self.gamma_reward = None
         self.initial_total_asset = None
 
+        # For advanced features
+        self.asset_history = []
+        self.peak_asset = None
+        self.price_history = []
+        self.pending_actions = []
+
         # environment information
         self.env_name = "StockEnv"
-        # self.state_dim = 1 + 2 + 2 * stock_dim + self.tech_ary.shape[1]
-        # # amount + (turbulence, turbulence_bool) + (price, stock) * stock_dim + tech_dim
         self.state_dim = 1 + 2 + 3 * stock_dim + self.tech_ary.shape[1]
-        # amount + (turbulence, turbulence_bool) + (price, stock) * stock_dim + tech_dim
         self.stocks_cd = None
         self.action_dim = stock_dim
         self.max_step = self.price_ary.shape[0] - 1
@@ -77,12 +97,7 @@ class StockTradingEnv(gym.Env):
             low=-1, high=1, shape=(self.action_dim,), dtype=np.float32
         )
 
-    def reset(
-        self,
-        *,
-        seed=None,
-        options=None,
-    ):
+    def reset(self):
         self.day = 0
         price = self.price_ary[self.day]
 
@@ -103,45 +118,128 @@ class StockTradingEnv(gym.Env):
         self.total_asset = self.amount + (self.stocks * price).sum()
         self.initial_total_asset = self.total_asset
         self.gamma_reward = 0.0
+
+        # Advanced features
+        self.asset_history = [self.total_asset]
+        self.peak_asset = self.total_asset
+        self.price_history = [price]
+        self.pending_actions = []
+
         return self.get_state(price), {}  # state
 
     def step(self, actions):
+        # === Latency modeling: queue actions ===
+        self.pending_actions.append(actions)
+        if len(self.pending_actions) <= self.latency_steps:
+            # Not enough actions in queue, do nothing
+            actions = np.zeros_like(actions)
+        else:
+            actions = self.pending_actions.pop(0)
+
+        # === Dynamic risk exposure adjustment ===
+        exposure = 1.0
+        if len(self.asset_history) > self.volatility_window:
+            returns = np.diff(self.asset_history[-21:]) / np.array(self.asset_history[-21:-1]) if len(self.asset_history) > 21 else np.array([0])
+            sharpe = returns.mean() / (returns.std() + 1e-9) if returns.std() > 0 else 0
+            max_drawdown = np.min(self.asset_history) / (self.peak_asset + 1e-9) if self.peak_asset else 0
+        reward += 0.1 * sharpe - 0.1 * abs(max_drawdown)
+            # Linearly scale exposure between 1 and min_exposure
+            if volatility > self.max_volatility:
+                exposure = self.min_exposure
+            else:
+                exposure = max(self.min_exposure, 1 - (volatility / self.max_volatility) * (1 - self.min_exposure))
+        actions = actions * exposure
+
         actions = (actions * self.max_stock).astype(int)
 
         self.day += 1
         price = self.price_ary[self.day]
         self.stocks_cool_down += 1
 
+        # === Black swan/flash crash detection ===
+        price_drop = (self.price_history[-1] - price) / (self.price_history[-1] + 1e-9)
+        black_swan = np.any(price_drop > self.black_swan_thresh)
+        if black_swan:
+            # Capital preservation: liquidate all positions, hold cash
+            self.amount += (self.stocks * price).sum() * (1 - self.sell_cost_pct)
+            self.stocks[:] = 0
+            self.stocks_cool_down[:] = 0
+            state = self.get_state(price)
+            self.total_asset = self.amount
+            self.asset_history.append(self.total_asset)
+            self.price_history.append(price)
+            reward = -10.0  # Large penalty for black swan event
+            done = True
+            self.episode_return = self.total_asset / self.initial_total_asset
+            return state, reward, done, False, dict()
+
+        # === Stoploss logic ===
+        # If any stock falls below stoploss threshold from purchase price, force sell
+        # For simplicity, use previous day's price as reference
+        stoploss_trigger = (price < (np.array(self.price_history[-1]) * (1 - self.stoploss_pct)))
+        for idx in np.where(stoploss_trigger)[0]:
+            if self.stocks[idx] > 0:
+                sell_num_shares = self.stocks[idx]
+                # Apply slippage to sell price
+                exec_price = price[idx] * (1 - self.slippage_pct)
+                self.amount += exec_price * sell_num_shares * (1 - self.sell_cost_pct)
+                self.stocks[idx] = 0
+                self.stocks_cool_down[idx] = 0
+
+        # === Trading logic with slippage and commission ===
         if self.turbulence_bool[self.day] == 0:
             min_action = int(self.max_stock * self.min_stock_rate)  # stock_cd
             for index in np.where(actions < -min_action)[0]:  # sell_index:
-                if price[index] > 0:  # Sell only if current asset is > 0
+                if price[index] > 0:
                     sell_num_shares = min(self.stocks[index], -actions[index])
+                    # Apply slippage to sell price
+                    exec_price = price[index] * (1 - self.slippage_pct)
                     self.stocks[index] -= sell_num_shares
                     self.amount += (
-                        price[index] * sell_num_shares * (1 - self.sell_cost_pct)
+                        exec_price * sell_num_shares * (1 - self.sell_cost_pct)
                     )
                     self.stocks_cool_down[index] = 0
             for index in np.where(actions > min_action)[0]:  # buy_index:
-                if (
-                    price[index] > 0
-                ):  # Buy only if the price is > 0 (no missing data in this particular date)
-                    buy_num_shares = min(self.amount // price[index], actions[index])
+                if price[index] > 0:
+                    # Apply slippage to buy price
+                    exec_price = price[index] * (1 + self.slippage_pct)
+                    buy_num_shares = min(self.amount // exec_price, actions[index])
                     self.stocks[index] += buy_num_shares
                     self.amount -= (
-                        price[index] * buy_num_shares * (1 + self.buy_cost_pct)
+                        exec_price * buy_num_shares * (1 + self.buy_cost_pct)
                     )
                     self.stocks_cool_down[index] = 0
-
         else:  # sell all when turbulence
-            self.amount += (self.stocks * price).sum() * (1 - self.sell_cost_pct)
+            exec_price = price * (1 - self.slippage_pct)
+            self.amount += (self.stocks * exec_price).sum() * (1 - self.sell_cost_pct)
             self.stocks[:] = 0
             self.stocks_cool_down[:] = 0
 
         state = self.get_state(price)
         total_asset = self.amount + (self.stocks * price).sum()
+
+        # === Drawdown penalty ===
+        self.peak_asset = max(self.peak_asset, total_asset)
+        drawdown = (self.peak_asset - total_asset) / (self.peak_asset + 1e-9)
         reward = (total_asset - self.total_asset) * self.reward_scaling
+        if drawdown > 0.05:
+            # Exponential penalty for drawdown > 5%
+            reward -= np.exp(10 * (drawdown - 0.05))
+
+                    # === GPT-based context-aware reward shaping ===
+        max_drawdown = np.min(self.asset_history) / (self.peak_asset + 1e-9) if self.peak_asset else 0
+        reward += 0.1 * sharpe - 0.1 * abs(max_drawdown)
+
+        reward = gpt_contextual_reward(
+            reward,
+            self.macro_context,
+            actions,
+            self.gpt_client
+        )
+
         self.total_asset = total_asset
+        self.asset_history.append(self.total_asset)
+        self.price_history.append(price)
 
         self.gamma_reward = self.gamma_reward * self.gamma + reward
         done = self.day == self.max_step
@@ -171,4 +269,4 @@ class StockTradingEnv(gym.Env):
         def sigmoid(x):
             return 1 / (1 + np.exp(-x * np.e)) - 0.5
 
-        return sigmoid(ary / thresh) * thresh
+return sigmoid(ary / thresh) * thresh
