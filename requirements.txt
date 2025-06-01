@@ -4,3 +4,5 @@ gymnasium
 gym
 scikit-learn
 yfinance
+matplotlib
+stockstats
