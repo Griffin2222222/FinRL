@@ -97,30 +97,29 @@ class DRLAgent:
 
     def __init__(self, env):
         self.env = env
+
     def get_model(
-    self,
-    model_name,
-    policy="MlpPolicy",
-    policy_kwargs=None,
-    model_kwargs=None,
-    verbose=1,
-    seed=None,
-    tensorboard_log=None,
-):
-    if model_name == "ppo":
-        policy = "MlpLstmPolicy"
-    if model_kwargs is None:
-        model_kwargs = MODEL_KWARGS[model_name].copy()
-    else:
-        model_kwargs = model_kwargs.copy()
-    if model_name == "ppo":
-        model_kwargs["ent_coef"] = model_kwargs.get("ent_coef", 0.01) # Set entropy regularization
-
+        self,
+        model_name,
+        policy="MlpPolicy",
+        policy_kwargs=None,
+        model_kwargs=None,
+        verbose=1,
+        seed=None,
+        tensorboard_log=None,
+    ):
+        if model_name == "ppo":
+            policy = "MlpLstmPolicy"
+        if model_kwargs is None:
+            model_kwargs = MODEL_KWARGS[model_name].copy()
+        else:
+            model_kwargs = model_kwargs.copy()
+        if model_name == "ppo":
+            model_kwargs["ent_coef"] = model_kwargs.get(
+                "ent_coef", 0.01
+            )  # Set entropy regularization
         if model_name not in MODELS:
-            raise ValueError(
-                f"Model '{model_name}' not found in MODELS."
-            )  # this is more informative than NotImplementedError("NotImplementedError")
-
+            raise ValueError(f"Model '{model_name}' not found in MODELS.")
         if "action_noise" in model_kwargs:
             n_actions = self.env.action_space.shape[-1]
             model_kwargs["action_noise"] = NOISE[model_kwargs["action_noise"]](
@@ -216,27 +215,29 @@ class DRLAgent:
             episode_total_assets.append(total_asset)
             episode_return = total_asset / environment.initial_total_asset
             episode_returns.append(episode_return)
-            
+
             # In DRLEnsembleAgent.run_ensemble_strategy, after each validation:
-patience = 10
-best_sharpe = -np.inf
-epochs_no_improve = 0
+            patience = 10
+            best_sharpe = -np.inf
+            epochs_no_improve = 0
 
-for epoch in range(max_epochs):
-    # ... training and validation logic ...
-    current_sharpe = self.get_validation_sharpe(epoch, model_name)
-    if current_sharpe > best_sharpe:
-        best_sharpe = current_sharpe
-        epochs_no_improve = 0
-    else:
-        epochs_no_improve += 1
-    if epochs_no_improve >= patience:
-        print(f"Early stopping at epoch {epoch} due to no Sharpe improvement.")
-        break
+            for epoch in range(max_epochs):
+                # ... training and validation logic ...
+                current_sharpe = self.get_validation_sharpe(epoch, model_name)
+                if current_sharpe > best_sharpe:
+                    best_sharpe = current_sharpe
+                    epochs_no_improve = 0
+                else:
+                    epochs_no_improve += 1
+                if epochs_no_improve >= patience:
+                    print(
+                        f"Early stopping at epoch {epoch} due to no Sharpe improvement."
+                    )
+                    break
 
-        print("episode_return", episode_return)
-        print("Test Finished!")
-        return episode_total_assets
+            print("episode_return", episode_return)
+            print("Test Finished!")
+            return episode_total_assets
 
 
 class DRLEnsembleAgent:
@@ -249,22 +250,9 @@ class DRLEnsembleAgent:
         model_kwargs=None,
         seed=None,
         verbose=1,
-        patience = 10,
-        best_sharpe = -np.inf,
-        epochs_no_improve = 0
-
-for epoch in range(max_epochs):
-    # ... training and validation logic ...
-    current_sharpe = self.get_validation_sharpe(epoch, model_name)
-    if current_sharpe > best_sharpe:
-        best_sharpe = current_sharpe
-        epochs_no_improve = 0
-    else:
-        epochs_no_improve += 1
-    if epochs_no_improve >= patience:
-        print(f"Early stopping at epoch {epoch} due to no Sharpe improvement.")
-        break
-
+        patience=10,
+        best_sharpe=-np.inf,
+        epochs_no_improve=0,
     ):
         if model_name not in MODELS:
             raise ValueError(

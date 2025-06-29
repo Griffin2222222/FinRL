@@ -1,5 +1,5 @@
 def add_rolling_stats(df, window=20):
-    returns = df['close'].pct_change().fillna(0)
+    returns = df["close"].pct_change().fillna(0)
     risk_free_rate = 0.0
 
     rolling_mean = returns.rolling(window).mean()
@@ -12,7 +12,7 @@ def add_rolling_stats(df, window=20):
     rolling_max = cumulative.rolling(window, min_periods=1).max()
     drawdown = (cumulative - rolling_max) / rolling_max
 
-    df['rolling_sharpe'] = sharpe
-    df['rolling_sortino'] = sortino
-    df['rolling_drawdown'] = drawdown
+    df["rolling_sharpe"] = sharpe
+    df["rolling_sortino"] = sortino
+    df["rolling_drawdown"] = drawdown
     return df

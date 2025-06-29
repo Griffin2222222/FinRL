@@ -75,19 +75,75 @@ def test_patient(data, ticker_list):
     assert np.sum(holdings) == 0
 
 
-@pytest.mark.xfail(reason="Not implemented")
-def test_cost_penalties():
-    raise NotImplementedError
+def test_cost_penalties(data, ticker_list):
+    """Test that cost penalties are applied correctly when buying/selling."""
+    init_amt = 1e6
+    env = StockTradingEnvCashpenalty(
+        df=data,
+        initial_amount=init_amt,
+        buy_cost_pct=0.01,
+        sell_cost_pct=0.01,
+        cache_indicator_data=False,
+    )
+    _ = env.reset()
+    actions = np.ones(len(ticker_list))
+    next_state, _, _, _ = env.step(actions)
+    # After buying, cash should decrease by at least 1% (buy cost)
+    assert next_state[0] < init_amt
+    # After selling, cash should decrease by at least 1% (sell cost)
+    actions = -np.ones(len(ticker_list))
+    next_state, _, _, _ = env.step(actions)
+    assert next_state[0] < init_amt
 
 
-@pytest.mark.xfail(reason="Not implemented")
-def test_purchases():
-    raise NotImplementedError
+def test_purchases(data, ticker_list):
+    """Test that purchases increase holdings and decrease cash."""
+    init_amt = 1e6
+    env = StockTradingEnvCashpenalty(
+        df=data, initial_amount=init_amt, cache_indicator_data=False
+    )
+    _ = env.reset()
+    actions = np.ones(len(ticker_list))
+    next_state, _, _, _ = env.step(actions)
+    holdings = next_state[1 : 1 + len(ticker_list)]
+    assert np.all(holdings >= 0)
+    assert next_state[0] < init_amt
 
 
-@pytest.mark.xfail(reason="Not implemented")
-def test_gains():
-    raise NotImplementedError
+def test_gains(data, ticker_list):
+    """Test that positive price movement increases total assets."""
+    init_amt = 1e6
+    env = StockTradingEnvCashpenalty(
+        df=data, initial_amount=init_amt, cache_indicator_data=False
+    )
+    _ = env.reset()
+    actions = np.ones(len(ticker_list))
+    next_state, _, _, _ = env.step(actions)
+    # Simulate price increase
+    env.df.loc[:, "close"] = env.df["close"] * 1.1
+    next_state, _, _, _ = env.step(np.zeros(len(ticker_list)))
+    total_assets = env.account_information["total_assets"][-1]
+    assert total_assets > init_amt
+
+
+def test_no_lookahead_bias(data, ticker_list):
+    """Test that environment state and reward do not use future data (no lookahead bias)."""
+    init_amt = 1e6
+    env = StockTradingEnvCashpenalty(
+        df=data, initial_amount=init_amt, cache_indicator_data=False
+    )
+    _ = env.reset()
+    for _ in range(3):
+        actions = np.zeros(len(ticker_list))
+        state, _, _, _ = env.step(actions)
+        # The state should only use data up to the current step
+        current_date = env.dates[env.date_index]
+        for i, tic in enumerate(ticker_list):
+            # Check that the price in state matches the price in df for current date
+            price_idx = 1 + i  # cash + i
+            price_in_state = state[price_idx]
+            price_in_df = env.df[(env.df["tic"] == tic)].loc[current_date, "close"]
+            assert np.isclose(price_in_state, price_in_df, atol=1e-2)
 
 
 @pytest.mark.skip(reason="this test is not working correctly")

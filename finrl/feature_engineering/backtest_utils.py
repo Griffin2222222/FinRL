@@ -1,4 +1,6 @@
-def apply_slippage_and_cost(price, action, slippage_pct=0.001, cost_pct=0.001, side="buy"):
+def apply_slippage_and_cost(
+    price, action, slippage_pct=0.001, cost_pct=0.001, side="buy"
+):
     if side == "buy":
         exec_price = price * (1 + slippage_pct)
     else:

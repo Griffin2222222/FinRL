@@ -322,3 +322,17 @@ For trademark inquiries or permissions, please contact: contact@finrl.ai
 ```
 
 **Disclaimer: We are sharing codes for academic purpose under the MIT education license. Nothing herein is financial advice, and NOT a recommendation to trade real money. Please use common sense and always first consult a professional before trading or investing.**
+
+## FinGPT Integration
+
+FinGPT (from [Griffin2222222/myfingpt](https://github.com/Griffin2222222/myfingpt)) is now fully integrated under `finrl/fingpt/myfingpt`.
+
+- All FinGPT modules and features are available for use within FinRL.
+- To use FinGPT in your scripts:
+
+```python
+from finrl.fingpt import FinGPT_Forecaster  # or any other module
+```
+
+- All dependencies are unified in the main `requirements.txt`.
+- See `finrl/fingpt/myfingpt/README.md` for FinGPT-specific usage and examples.

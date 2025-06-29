@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections import deque
 
 import gym
 import matplotlib
@@ -89,6 +90,7 @@ class PortfolioOptimizationEnv(gym.Env):
         time_window=1,
         cwd="./",
         new_gym_api=False,
+        save_plots=True,  # New flag to control plot saving
     ):
         """Initializes environment's instance.
 
@@ -134,10 +136,13 @@ class PortfolioOptimizationEnv(gym.Env):
         self._reward_scaling = reward_scaling
         self._comission_fee_pct = comission_fee_pct
         self._comission_fee_model = comission_fee_model
+        if "sentiment_score" in df.columns and "sentiment_score" not in features:
+            features = features + ["sentiment_score"]
         self._features = features
         self._valuation_feature = valuation_feature
         self._cwd = Path(cwd)
         self._new_gym_api = new_gym_api
+        self._save_plots = save_plots
 
         # results file
         self._results_file = self._cwd / "results" / "rl"
@@ -235,26 +240,34 @@ class PortfolioOptimizationEnv(gym.Env):
             )
             metrics_df.set_index("date", inplace=True)
 
-            plt.plot(metrics_df["portfolio_values"], "r")
-            plt.title("Portfolio Value Over Time")
-            plt.xlabel("Time")
-            plt.ylabel("Portfolio value")
-            plt.savefig(self._results_file / "portfolio_value.png")
-            plt.close()
-
-            plt.plot(self._portfolio_reward_memory, "r")
-            plt.title("Reward Over Time")
-            plt.xlabel("Time")
-            plt.ylabel("Reward")
-            plt.savefig(self._results_file / "reward.png")
-            plt.close()
-
-            plt.plot(self._actions_memory)
-            plt.title("Actions performed")
-            plt.xlabel("Time")
-            plt.ylabel("Weight")
-            plt.savefig(self._results_file / "actions.png")
-            plt.close()
+            if self._save_plots:
+                try:
+                    plt.plot(metrics_df["portfolio_values"], "r")
+                    plt.title("Portfolio Value Over Time")
+                    plt.xlabel("Time")
+                    plt.ylabel("Portfolio value")
+                    plt.savefig(self._results_file / "portfolio_value.png")
+                    plt.close()
+                except Exception as e:
+                    print(f"Warning: Failed to save portfolio value plot: {e}")
+                try:
+                    plt.plot(self._portfolio_reward_memory, "r")
+                    plt.title("Reward Over Time")
+                    plt.xlabel("Time")
+                    plt.ylabel("Reward")
+                    plt.savefig(self._results_file / "reward.png")
+                    plt.close()
+                except Exception as e:
+                    print(f"Warning: Failed to save reward plot: {e}")
+                try:
+                    plt.plot(self._actions_memory)
+                    plt.title("Actions performed")
+                    plt.xlabel("Time")
+                    plt.ylabel("Weight")
+                    plt.savefig(self._results_file / "actions.png")
+                    plt.close()
+                except Exception as e:
+                    print(f"Warning: Failed to save actions plot: {e}")
 
             print("=================================")
             print("Initial portfolio value:{}".format(self._asset_memory["final"][0]))
@@ -264,19 +277,26 @@ class PortfolioOptimizationEnv(gym.Env):
                     self._portfolio_value / self._asset_memory["final"][0]
                 )
             )
-            print(
-                "Maximum DrawDown: {}".format(
-                    qs.stats.max_drawdown(metrics_df["portfolio_values"])
+            try:
+                print(
+                    "Maximum DrawDown: {}".format(
+                        qs.stats.max_drawdown(metrics_df["portfolio_values"])
+                    )
                 )
-            )
-            print("Sharpe ratio: {}".format(qs.stats.sharpe(metrics_df["returns"])))
+                print("Sharpe ratio: {}".format(qs.stats.sharpe(metrics_df["returns"])))
+            except Exception as e:
+                print(f"Warning: QuantStats metrics calculation failed: {e}")
             print("=================================")
 
-            qs.plots.snapshot(
-                metrics_df["returns"],
-                show=False,
-                savefig=self._results_file / "portfolio_summary.png",
-            )
+            if self._save_plots:
+                try:
+                    qs.plots.snapshot(
+                        metrics_df["returns"],
+                        show=False,
+                        savefig=self._results_file / "portfolio_summary.png",
+                    )
+                except Exception as e:
+                    print(f"Warning: Failed to save QuantStats snapshot: {e}")
 
             if self._new_gym_api:
                 return self._state, self._reward, self._terminal, False, self._info
@@ -451,7 +471,7 @@ class PortfolioOptimizationEnv(gym.Env):
         state = None
         for tic in self._tic_list:
             tic_data = self._data[self._data[self._tic_column] == tic]
-            tic_data = tic_data[self._features].to_numpy().T
+            tic_data = tic_data[self._features].to_numpy(dtype=np.float32).T
             tic_data = tic_data[..., np.newaxis]
             state = tic_data if state is None else np.append(state, tic_data, axis=2)
         state = state.transpose((0, 2, 1))
@@ -533,24 +553,21 @@ class PortfolioOptimizationEnv(gym.Env):
     def _reset_memory(self):
         """Resets the environment's memory."""
         date_time = self._sorted_times[self._time_index]
-        # memorize portfolio value each step
+        # Use deque for memory efficiency, with maxlen set to episode_length+1
+        maxlen = self.episode_length + 1 if hasattr(self, "episode_length") else None
         self._asset_memory = {
-            "initial": [self._initial_amount],
-            "final": [self._initial_amount],
+            "initial": deque([self._initial_amount], maxlen=maxlen),
+            "final": deque([self._initial_amount], maxlen=maxlen),
         }
-        # memorize portfolio return and reward each step
-        self._portfolio_return_memory = [0]
-        self._portfolio_reward_memory = [0]
-        # initial action: all money is allocated in cash
-        self._actions_memory = [
-            np.array([1] + [0] * self.portfolio_size, dtype=np.float32)
-        ]
-        # memorize portfolio weights at the ending of time step
-        self._final_weights = [
-            np.array([1] + [0] * self.portfolio_size, dtype=np.float32)
-        ]
-        # memorize datetimes
-        self._date_memory = [date_time]
+        self._portfolio_return_memory = deque([0], maxlen=maxlen)
+        self._portfolio_reward_memory = deque([0], maxlen=maxlen)
+        self._actions_memory = deque(
+            [np.array([1] + [0] * self.portfolio_size, dtype=np.float32)], maxlen=maxlen
+        )
+        self._final_weights = deque(
+            [np.array([1] + [0] * self.portfolio_size, dtype=np.float32)], maxlen=maxlen
+        )
+        self._date_memory = deque([date_time], maxlen=maxlen)
 
     def _standardize_state(self, state):
         """Standardize the state given the observation space. If "return_last_action"

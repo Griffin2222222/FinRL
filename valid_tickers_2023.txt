@@ -1,0 +1,34 @@
+YF.download() has changed argument auto_adjust default to True
+OK: AXP
+OK: AMGN
+OK: AAPL
+OK: BA
+OK: CAT
+OK: CSCO
+OK: CVX
+OK: GS
+OK: HD
+OK: HON
+OK: IBM
+OK: INTC
+OK: JNJ
+OK: KO
+OK: JPM
+OK: MCD
+OK: MMM
+OK: MRK
+OK: MSFT
+OK: NKE
+OK: PG
+OK: TRV
+OK: UNH
+OK: CRM
+OK: VZ
+OK: V
+OK: WBA
+OK: WMT
+OK: DIS
+OK: DOW
+
+Valid tickers for 2023-2025:
+['AXP', 'AMGN', 'AAPL', 'BA', 'CAT', 'CSCO', 'CVX', 'GS', 'HD', 'HON', 'IBM', 'INTC', 'JNJ', 'KO', 'JPM', 'MCD', 'MMM', 'MRK', 'MSFT', 'NKE', 'PG', 'TRV', 'UNH', 'CRM', 'VZ', 'V', 'WBA', 'WMT', 'DIS', 'DOW']

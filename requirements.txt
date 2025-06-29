@@ -31,3 +31,7 @@ tensorboard
 webdriver-manager
 wheel>=0.33.6
 wrds
+pandas_market_calendars
+fingpt
+requests
+tushare

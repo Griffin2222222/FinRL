@@ -1,11 +1,12 @@
 import numpy as np
 from typing import Union
 
+
 def blend_actions(
     rl_action: Union[np.ndarray, float],
     sentiment_score: Union[np.ndarray, float],
     sentiment_confidence: Union[np.ndarray, float],
-    alpha: float = 0.5
+    alpha: float = 0.5,
 ) -> np.ndarray:
     """
     Blend RL action and sentiment signal using confidence-weighted logic.
@@ -27,6 +28,7 @@ def blend_actions(
     weight = alpha * sentiment_confidence
     blended = (1 - weight) * rl_action + weight * sentiment_score
     return np.clip(blended, -1, 1)
+
 
 # Example usage
 if __name__ == "__main__":

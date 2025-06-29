@@ -1,5 +1,6 @@
 import numpy as np
 
+
 class GPTContextualReward:
     """
     Class to adjust rewards based on macroeconomic context using a GPT client or rule-based logic.
@@ -28,17 +29,21 @@ class GPTContextualReward:
             # Fallback: simple rule-based adjustment
             context = macro_context.lower()
             if "recession" in context:
-                adjustment = -abs(base_reward) * 0.5  # penalize risky actions in recession
+                adjustment = (
+                    -abs(base_reward) * 0.5
+                )  # penalize risky actions in recession
             elif "boom" in context:
-                adjustment = abs(base_reward) * 0.5   # reward risk-taking in boom
+                adjustment = abs(base_reward) * 0.5  # reward risk-taking in boom
             else:
                 adjustment = 0
         return base_reward + adjustment
+
 
 class DummyGPTClient:
     """
     Example GPT client stub for reward adjustment.
     """
+
     def get_reward_adjustment(self, context, action):
         context = context.lower()
         # Ensure action is a numpy array for consistent behavior
@@ -51,6 +56,7 @@ class DummyGPTClient:
         elif "dovish" in context:
             return 0.1 * action_sum
         return 0
+
 
 # Example usage:
 if __name__ == "__main__":
@@ -66,5 +72,7 @@ if __name__ == "__main__":
 
     # Using rule-based fallback
     contextual_reward_rule = GPTContextualReward()
-    adjusted_reward_rule = contextual_reward_rule(base_reward, "Economy is in recession.", action)
+    adjusted_reward_rule = contextual_reward_rule(
+        base_reward, "Economy is in recession.", action
+    )
     print(f"Adjusted reward (rule-based): {adjusted_reward_rule}")

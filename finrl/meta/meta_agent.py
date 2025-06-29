@@ -1,15 +1,18 @@
 import numpy as np
 
+
 class DummyAgent:
     """
     A simple agent for demonstration. Replace with your actual agent implementation.
     """
+
     def __init__(self, name):
         self.name = name
 
     def act(self, state):
         # Dummy action: just return the agent's name and state for demonstration
-        return {'agent': self.name, 'action': 'hold', 'state': state}
+        return {"agent": self.name, "action": "hold", "state": state}
+
 
 class MetaAgent:
     def __init__(self, agents, regime_detector):
@@ -23,11 +26,12 @@ class MetaAgent:
 
     def select_agent(self, state, history=None):
         regime = self.regime_detector(state, history)
-        return self.agents.get(regime, self.agents['sideways'])
+        return self.agents.get(regime, self.agents["sideways"])
 
     def act(self, state, history=None):
         agent = self.select_agent(state, history)
         return agent.act(state)
+
 
 def simple_regime_detector(state, history=None, window=20):
     """
@@ -35,28 +39,25 @@ def simple_regime_detector(state, history=None, window=20):
     Returns: 'bull', 'bear', or 'sideways'
     """
     if history is None or len(history) < window:
-        return 'sideways'
+        return "sideways"
     returns = np.diff(history[-window:]) / np.array(history[-window:-1])
     mean_ret = np.mean(returns)
     if mean_ret > 0.002:
-        return 'bull'
+        return "bull"
     elif mean_ret < -0.002:
-        return 'bear'
+        return "bear"
     else:
-        return 'sideways'
+        return "sideways"
+
 
 # Example usage
 if __name__ == "__main__":
     # Create dummy agents for each regime
-    bull_agent = DummyAgent('bull')
-    bear_agent = DummyAgent('bear')
-    sideways_agent = DummyAgent('sideways')
+    bull_agent = DummyAgent("bull")
+    bear_agent = DummyAgent("bear")
+    sideways_agent = DummyAgent("sideways")
 
-    agents = {
-        'bull': bull_agent,
-        'bear': bear_agent,
-        'sideways': sideways_agent
-    }
+    agents = {"bull": bull_agent, "bear": bear_agent, "sideways": sideways_agent}
 
     meta_agent = MetaAgent(agents, simple_regime_detector)
 

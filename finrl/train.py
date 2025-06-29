@@ -9,6 +9,7 @@ from finrl.config import TRAIN_START_DATE
 from finrl.config_tickers import DOW_30_TICKER
 from finrl.meta.data_processor import DataProcessor
 from finrl.meta.env_stock_trading.env_stocktrading_np import StockTradingEnv
+from finrl.feature_engineering.logging_explain import get_tensorboard_writer, log_metrics_tensorboard
 
 import numpy as np
 
@@ -37,6 +38,7 @@ import numpy as np
 #    Train on simple env, then transfer to more complex.
 
 # === END ADVANCED AGENT IMPROVEMENTS ===
+
 
 def train(
     start_date,
@@ -140,10 +142,13 @@ def train(
     if transfer_model_path is not None:
         if drl_lib == "stable_baselines3":
             from stable_baselines3 import PPO
+
             pretrained_model = PPO.load(transfer_model_path, env=env_instance)
         # Add for other libs as needed
 
     cwd = kwargs.get("cwd", "./" + str(model_name))
+
+    tb_writer = get_tensorboard_writer(f"runs/finrl_train_{model_name}")
 
     if drl_lib == "elegantrl":
         from finrl.agents.elegantrl.models import DRLAgent as DRLAgent_erl
@@ -162,7 +167,7 @@ def train(
         else:
             model = agent.get_model(model_name, model_kwargs=erl_params)
         trained_model = agent.train_model(
-            model=model, cwd=cwd, total_timesteps=break_step
+            model=model, cwd=cwd, total_timesteps=break_step, tb_writer=tb_writer
         )
     elif drl_lib == "rllib":
         total_episodes = kwargs.get("total_episodes", 100)
@@ -185,6 +190,7 @@ def train(
             model_name=model_name,
             model_config=model_config,
             total_episodes=total_episodes,
+            tb_writer=tb_writer,
         )
         trained_model.save(cwd)
     elif drl_lib == "stable_baselines3":
@@ -197,7 +203,10 @@ def train(
         if lstm_policy:
             try:
                 from stable_baselines3 import RecurrentPPO
-                model = RecurrentPPO("MlpLstmPolicy", env_instance, **(agent_params or {}))
+
+                model = RecurrentPPO(
+                    "MlpLstmPolicy", env_instance, **(agent_params or {})
+                )
             except ImportError:
                 print("RecurrentPPO not available in your SB3 version.")
                 model = agent.get_model(model_name, model_kwargs=agent_params)
@@ -206,13 +215,16 @@ def train(
         else:
             model = agent.get_model(model_name, model_kwargs=agent_params)
         trained_model = agent.train_model(
-            model=model, tb_log_name=model_name, total_timesteps=total_timesteps
+            model=model, tb_log_name=model_name, total_timesteps=total_timesteps, tb_writer=tb_writer
         )
         print("Training is finished!")
         trained_model.save(cwd)
         print("Trained model is saved in " + str(cwd))
     else:
         raise ValueError("DRL library input is NOT supported. Please check.")
+
+    if tb_writer:
+        tb_writer.close()
 
 
 if __name__ == "__main__":

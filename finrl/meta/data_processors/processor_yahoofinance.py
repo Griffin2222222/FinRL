@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import os
 import time
 from datetime import date
 from datetime import timedelta
@@ -37,8 +38,13 @@ class YahooFinanceProcessor:
     Yahoo Finance API
     """
 
+    FAILED_TICKERS_CACHE = "yahoo_failed_tickers.txt"
+
     def __init__(self):
-        pass
+        self.failed_tickers = set()
+        if os.path.exists(self.FAILED_TICKERS_CACHE):
+            with open(self.FAILED_TICKERS_CACHE, "r") as f:
+                self.failed_tickers = set(line.strip() for line in f if line.strip())
 
     """
     Param
@@ -219,6 +225,12 @@ class YahooFinanceProcessor:
 
         return time_interval
 
+    def _save_failed_tickers(self):
+        if self.failed_tickers:
+            with open(self.FAILED_TICKERS_CACHE, "w") as f:
+                for tic in sorted(self.failed_tickers):
+                    f.write(f"{tic}\n")
+
     def download_data(
         self,
         ticker_list: list[str],
@@ -226,39 +238,72 @@ class YahooFinanceProcessor:
         end_date: str,
         time_interval: str,
         proxy: str | dict = None,
+        max_failures: int = 2,  # fast skip after 2 consecutive failures
+        max_days: int = 3,     # only try for 3 days per ticker
     ) -> pd.DataFrame:
         time_interval = self.convert_interval(time_interval)
-
         self.start = start_date
         self.end = end_date
         self.time_interval = time_interval
-
-        # Download and save the data in a pandas DataFrame
         start_date = pd.Timestamp(start_date)
         end_date = pd.Timestamp(end_date)
         delta = timedelta(days=1)
         data_df = pd.DataFrame()
+        skipped_tickers = []
         for tic in ticker_list:
+            if tic in self.failed_tickers:
+                print(f"[CACHE-SKIP] Skipping {tic} (previously failed)")
+                skipped_tickers.append(tic)
+                continue
             current_tic_start_date = start_date
-            while (
-                current_tic_start_date <= end_date
-            ):  # downloading daily to workaround yfinance only allowing  max 7 calendar (not trading) days of 1 min data per single download
-                temp_df = yf.download(
-                    tic,
-                    start=current_tic_start_date,
-                    end=current_tic_start_date + delta,
-                    interval=self.time_interval,
-                    proxy=proxy,
-                )
-                if temp_df.columns.nlevels != 1:
-                    temp_df.columns = temp_df.columns.droplevel(1)
-
-                temp_df["tic"] = tic
-                data_df = pd.concat([data_df, temp_df])
+            consecutive_failures = 0
+            days_tried = 0
+            valid_data_found = False
+            while current_tic_start_date <= end_date and days_tried < max_days:
+                try:
+                    temp_df = yf.download(
+                        tic,
+                        start=current_tic_start_date,
+                        end=current_tic_start_date + delta,
+                        interval=self.time_interval,
+                        proxy=proxy,
+                    )
+                    days_tried += 1
+                    if temp_df.empty or temp_df.isnull().all().all():
+                        consecutive_failures += 1
+                        if consecutive_failures >= max_failures:
+                            print(f"[FAST-SKIP] Skipping {tic} after {consecutive_failures} consecutive missing data days (tried {days_tried} days)")
+                            skipped_tickers.append(tic)
+                            self.failed_tickers.add(tic)
+                            break
+                        current_tic_start_date += delta
+                        continue
+                    if temp_df.columns.nlevels != 1:
+                        temp_df.columns = temp_df.columns.droplevel(1)
+                    temp_df["tic"] = tic
+                    data_df = pd.concat([data_df, temp_df])
+                    valid_data_found = True
+                    consecutive_failures = 0  # reset on success
+                except Exception as e:
+                    consecutive_failures += 1
+                    days_tried += 1
+                    print(f"[ERROR] Download failed for {tic} on {current_tic_start_date.date()}: {e}")
+                    if consecutive_failures >= max_failures:
+                        print(f"[FAST-SKIP] Skipping {tic} after {consecutive_failures} consecutive errors (tried {days_tried} days)")
+                        skipped_tickers.append(tic)
+                        self.failed_tickers.add(tic)
+                        break
                 current_tic_start_date += delta
-
-        data_df = data_df.reset_index().drop(columns=["Adj Close"])
-        # convert the column names to match processor_alpaca.py as far as poss
+            if not valid_data_found:
+                print(f"[FAST-SKIP] Skipping {tic} due to no valid data found in {max_days} days.")
+                skipped_tickers.append(tic)
+                self.failed_tickers.add(tic)
+        if skipped_tickers:
+            print(f"[INFO] Skipped tickers due to persistent data issues: {skipped_tickers}")
+        self._save_failed_tickers()
+        if data_df.empty:
+            raise ValueError("No data downloaded for any ticker in the given range.")
+        data_df = data_df.reset_index().drop(columns=["Adj Close"], errors="ignore")
         data_df.columns = [
             "timestamp",
             "close",
@@ -268,7 +313,6 @@ class YahooFinanceProcessor:
             "volume",
             "tic",
         ]
-
         return data_df
 
     def clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -412,21 +456,34 @@ class YahooFinanceProcessor:
 
     def add_vix(self, data: pd.DataFrame) -> pd.DataFrame:
         """
-        add vix from yahoo finance
-        :param data: (df) pandas dataframe
-        :return: (df) pandas dataframe
+        Add VIX (volatility index) as a feature. Try Yahoo VIXY, then Nasdaq Data Link (FRED/VIXCLS), else fill NaN.
         """
-        vix_df = self.download_data(["VIXY"], self.start, self.end, self.time_interval)
-        cleaned_vix = self.clean_data(vix_df)
-        print("cleaned_vix\n", cleaned_vix)
-        vix = cleaned_vix[["timestamp", "close"]]
-        print('cleaned_vix[["timestamp", "close"]\n', vix)
-        vix = vix.rename(columns={"close": "VIXY"})
-        print('vix.rename(columns={"close": "VIXY"}\n', vix)
-
+        try:
+            vix_df = self.download_data(["VIXY"], self.start, self.end, self.time_interval)
+            cleaned_vix = self.clean_data(vix_df)
+            vix = cleaned_vix[["timestamp", "close"]]
+            vix = vix.rename(columns={"close": "VIXY"})
+            print("[INFO] VIXY data loaded from Yahoo Finance.")
+        except Exception as e:
+            print(f"[WARN] VIXY unavailable from Yahoo: {e}. Trying Nasdaq Data Link (FRED/VIXCLS)...")
+            try:
+                from finrl.feature_engineering.nasdaq_data_link import get_macro_data, get_api_key
+                vix_fred = get_macro_data("FRED/VIXCLS", self.start, self.end)
+                if not vix_fred.empty:
+                    vix_fred = vix_fred.rename(columns={"Date": "timestamp", "Value": "VIXY"})
+                    vix_fred["timestamp"] = pd.to_datetime(vix_fred["timestamp"]).dt.strftime("%Y-%m-%d")
+                    vix = vix_fred[["timestamp", "VIXY"]]
+                    print("[INFO] VIX data loaded from FRED/VIXCLS.")
+                else:
+                    raise ValueError("FRED/VIXCLS returned empty.")
+            except Exception as e2:
+                print(f"[WARN] Could not fetch VIX from FRED/VIXCLS: {e2}. Filling with NaN.")
+                vix = pd.DataFrame({
+                    "timestamp": data["timestamp"].unique(),
+                    "VIXY": float('nan')
+                })
         df = data.copy()
-        print("df\n", df)
-        df = df.merge(vix, on="timestamp")
+        df = df.merge(vix, on="timestamp", how="left")
         df = df.sort_values(["timestamp", "tic"]).reset_index(drop=True)
         return df
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from finrl.feature_engineering.logging_explain import get_tensorboard_writer, log_metrics_tensorboard
 from finrl.meta.env_stock_trading.env_stock_papertrading import AlpacaPaperTrading
 from finrl.test import test
 
@@ -21,9 +22,10 @@ def trade(
     if_vix=True,
     **kwargs,
 ):
+    writer = get_tensorboard_writer(log_dir=kwargs.get("tensorboard_log_dir", "runs/finrl_trade"))
     if trade_mode == "backtesting":
         # use test function for backtesting mode
-        test(
+        results = test(
             start_date,
             end_date,
             ticker_list,
@@ -36,7 +38,11 @@ def trade(
             if_vix=True,
             **kwargs,
         )
-
+        # Log results if available
+        if isinstance(results, (list, tuple)):
+            for step, asset in enumerate(results):
+                log_metrics_tensorboard(writer, step, {"total_assets": asset})
+        writer.close()
     elif trade_mode == "paper_trading":
         # read parameters
         try:
@@ -67,12 +73,14 @@ def trade(
             max_stock=1e2,
             latency=None,
         )
-
-        # AlpacaPaperTrading.run()  # run paper trading
-        paper_trading.run()
-        # bug fix run is a instance function not static
-
+        # Run paper trading and log metrics if available
+        results = paper_trading.run()
+        if isinstance(results, (list, tuple)):
+            for step, asset in enumerate(results):
+                log_metrics_tensorboard(writer, step, {"total_assets": asset})
+        writer.close()
     else:
+        writer.close()
         raise ValueError(
             "Invalid mode input! Please input either 'backtesting' or 'paper_trading'."
         )

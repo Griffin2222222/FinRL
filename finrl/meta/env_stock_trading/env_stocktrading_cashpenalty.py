@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 import time
 from copy import deepcopy
+import logging
 
 import gym
 import matplotlib
@@ -12,6 +13,8 @@ from gym import spaces
 from stable_baselines3.common import logger
 from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.vec_env import SubprocVecEnv
+from finrl.feature_engineering.backtest_utils import apply_slippage_and_cost
+from finrl.feature_engineering.sentiment import get_sentiment_score  # Ensure this exists
 
 matplotlib.use("Agg")
 
@@ -49,6 +52,13 @@ class StockTradingEnvCashpenalty(gym.Env):
 
     metadata = {"render.modes": ["human"]}
 
+    # === RISK CONTROL DEFAULTS ===
+    # Set turbulence, stop-loss, and profit thresholds for robust risk management
+    DEFAULT_TURBULENCE_THRESHOLD = 100
+    DEFAULT_STOPLOSS_PENALTY = 0.9  # Sell if price < 90% of avg buy
+    DEFAULT_PROFIT_TAKE_RATIO = 1.2  # Take profit if price > 120% of avg buy
+    DEFAULT_VIX_THRESHOLD = 30  # Example: avoid trading if VIX > 30
+
     def __init__(
         self,
         df,
@@ -67,6 +77,12 @@ class StockTradingEnvCashpenalty(gym.Env):
         random_start=True,
         patient=False,
         currency="$",
+        volatility_window=20,
+        max_volatility=0.03,
+        min_exposure=0.2,
+        black_swan_thresh=0.15,
+        macro_context=None,
+        gpt_client=None,
     ):
         self.df = df
         self.stock_col = "tic"
@@ -99,6 +115,22 @@ class StockTradingEnvCashpenalty(gym.Env):
         self.cache_indicator_data = cache_indicator_data
         self.cached_data = None
         self.cash_penalty_proportion = cash_penalty_proportion
+        self.volatility_window = volatility_window
+        self.max_volatility = max_volatility
+        self.min_exposure = min_exposure
+        self.black_swan_thresh = black_swan_thresh
+        self.asset_history = []
+        self.peak_asset = None
+        self.price_history = []
+        self.pending_actions = []
+        self.macro_context = macro_context
+        self.gpt_client = gpt_client
+        if (
+            "sentiment_score" in df.columns
+            and "sentiment_score" not in daily_information_cols
+        ):
+            daily_information_cols = daily_information_cols + ["sentiment_score"]
+        self.df = df
         if self.cache_indicator_data:
             print("caching data")
             self.cached_data = [
@@ -160,6 +192,10 @@ class StockTradingEnvCashpenalty(gym.Env):
             + self.get_date_vector(self.date_index)
         )
         self.state_memory.append(init_state)
+        self.asset_history = [self.initial_amount]
+        self.peak_asset = self.initial_amount
+        self.price_history = [self.get_date_vector(self.date_index, cols=["close"])]
+        self.pending_actions = []
         return init_state
 
     def get_date_vector(self, date, cols=None):
@@ -229,6 +265,11 @@ class StockTradingEnvCashpenalty(gym.Env):
         ]
         self.episode_history.append(rec)
         print(self.template.format(*rec))
+        # Log to file for audit
+        logging.basicConfig(
+            filename="trades_log.csv", level=logging.INFO, format="%(message)s"
+        )
+        logging.info(",".join(map(str, rec)))
 
     def log_header(self):
         if self.printed_header is False:
@@ -255,8 +296,16 @@ class StockTradingEnvCashpenalty(gym.Env):
             cash = self.account_information["cash"][-1]
             cash_penalty = max(0, (assets * self.cash_penalty_proportion - cash))
             assets -= cash_penalty
+            # Add drawdown penalty
+            peak = max(self.account_information["total_assets"])
+            drawdown = (peak - assets) / (peak + 1e-9)
+            # Add risk-adjusted reward (Sharpe proxy)
+            rewards = self.account_information["reward"]
+            sharpe = np.mean(rewards) / (np.std(rewards) + 1e-9) if len(rewards) > 1 else 0
             reward = (assets / self.initial_amount) - 1
             reward /= self.current_step
+            # Penalize large drawdowns, reward high Sharpe
+            reward += 0.05 * sharpe - 0.1 * drawdown
             return reward
 
     def get_transactions(self, actions):
@@ -302,6 +351,38 @@ class StockTradingEnvCashpenalty(gym.Env):
         return actions
 
     def step(self, actions):
+        # === Latency modeling: queue actions ===
+        self.pending_actions.append(actions)
+        if len(self.pending_actions) <= 1:
+            actions = np.zeros_like(actions)
+        else:
+            actions = self.pending_actions.pop(0)
+
+        # === Dynamic risk exposure adjustment ===
+        exposure = 1.0
+        sharpe = 0
+        max_drawdown = 0
+        volatility = 0
+        if len(self.asset_history) > self.volatility_window:
+            returns = (
+                np.diff(self.asset_history[-self.volatility_window:]) / np.array(self.asset_history[-self.volatility_window:-1])
+            )
+            sharpe = returns.mean() / (returns.std() + 1e-9) if returns.std() > 0 else 0
+            max_drawdown = (
+                np.min(self.asset_history) / (self.peak_asset + 1e-9)
+                if self.peak_asset else 0
+            )
+            volatility = returns.std()
+            # Linearly scale exposure between 1 and min_exposure
+            if volatility > self.max_volatility:
+                exposure = self.min_exposure
+            else:
+                exposure = max(
+                    self.min_exposure,
+                    1 - (volatility / self.max_volatility) * (1 - self.min_exposure),
+                )
+        actions = actions * exposure
+
         # let's just log what we're doing in terms of max actions at each step.
         self.sum_trades += np.sum(np.abs(actions))
         self.log_header()
@@ -335,13 +416,36 @@ class StockTradingEnvCashpenalty(gym.Env):
 
             # compute our proceeds from sells, and add to cash
             sells = -np.clip(transactions, -np.inf, 0)
-            proceeds = np.dot(sells, self.closings)
-            costs = proceeds * self.sell_cost_pct
+            proceeds = 0
+            sell_costs = 0
+            for i, sell_amt in enumerate(sells):
+                if sell_amt > 0:
+                    exec_price, cost = apply_slippage_and_cost(
+                        self.closings[i],
+                        sell_amt,
+                        slippage_pct=0.001,
+                        cost_pct=self.sell_cost_pct,
+                        side="sell",
+                    )
+                    proceeds += exec_price * sell_amt
+                    sell_costs += cost
             coh = begin_cash + proceeds
             # compute the cost of our buys
             buys = np.clip(transactions, 0, np.inf)
-            spend = np.dot(buys, self.closings)
-            costs += spend * self.buy_cost_pct
+            spend = 0
+            buy_costs = 0
+            for i, buy_amt in enumerate(buys):
+                if buy_amt > 0:
+                    exec_price, cost = apply_slippage_and_cost(
+                        self.closings[i],
+                        buy_amt,
+                        slippage_pct=0.001,
+                        cost_pct=self.buy_cost_pct,
+                        side="buy",
+                    )
+                    spend += exec_price * buy_amt
+                    buy_costs += cost
+            costs = sell_costs + buy_costs
             # if we run out of cash...
             if (spend + costs) > coh:
                 if self.patient:
@@ -373,6 +477,64 @@ class StockTradingEnvCashpenalty(gym.Env):
                 [coh] + list(holdings_updated) + self.get_date_vector(self.date_index)
             )
             self.state_memory.append(state)
+            # Liquidity penalty: penalize if buy/sell volume exceeds a fraction of average volume
+            liquidity_penalty = 0
+            avg_volumes = np.array(
+                self.get_date_vector(self.date_index, cols=["volume"])
+            )
+            for i, (buy_amt, sell_amt) in enumerate(zip(buys, sells)):
+                # Assume 10% of avg volume is max reasonable trade size
+                max_liq = avg_volumes[i] * 0.1
+                if buy_amt > max_liq:
+                    liquidity_penalty -= (buy_amt - max_liq) / max_liq
+                if sell_amt > max_liq:
+                    liquidity_penalty -= (sell_amt - max_liq) / max_liq
+            reward += liquidity_penalty
+
+            # Black swan/flash crash detection
+            price = self.get_date_vector(self.date_index, cols=["close"])
+            price_drop = (self.price_history[-1] - price) / (self.price_history[-1] + 1e-9)
+            black_swan = np.any(price_drop > self.black_swan_thresh)
+            if black_swan:
+                # Capital preservation: liquidate all positions, hold cash
+                begin_cash = self.cash_on_hand
+                holdings = self.holdings
+                proceeds = np.dot(holdings, price) * (1 - self.sell_cost_pct)
+                coh = begin_cash + proceeds
+                holdings_updated = np.zeros_like(holdings)
+                self.state_memory.append([coh] + list(holdings_updated) + self.get_date_vector(self.date_index))
+                self.asset_history.append(coh)
+                self.price_history.append(price)
+                reward = -10.0  # Large penalty for black swan event
+                self.log_step(reason="BLACK SWAN")
+                return self.state_memory[-1], reward, True, {}
+
+            # After updating holdings, update asset history and price history
+            total_asset = self.state_memory[-1][0] + np.dot(self.state_memory[-1][1:len(self.assets)+1], price)
+            self.asset_history.append(total_asset)
+            self.price_history.append(price)
+            self.peak_asset = max(self.peak_asset, total_asset)
+            drawdown = (self.peak_asset - total_asset) / (self.peak_asset + 1e-9)
+            reward = self.get_reward()
+            if drawdown > 0.05:
+                reward -= np.exp(10 * (drawdown - 0.05))
+            # Add rolling Sharpe and drawdown bonuses/penalties
+            reward += 0.1 * sharpe - 0.1 * abs(max_drawdown)
+            # Sentiment-based reward shaping (if available)
+            if self.macro_context is not None and self.gpt_client is not None:
+                try:
+                    sentiment = get_sentiment_score(self.macro_context, self.gpt_client)
+                    reward += 0.05 * sentiment
+                except Exception as e:
+                    logging.warning(f"Sentiment API error: {e}")
+
+            # Advanced logging for explainability
+            logging.info(f"step={self.current_step}, asset={total_asset}, reward={reward}, exposure={exposure}, sharpe={sharpe}, drawdown={drawdown}")
+            # Save state-action pairs for SHAP/surrogate explainability
+            if not hasattr(self, 'explain_log'):
+                self.explain_log = []
+            self.explain_log.append({'state': self.state_memory[-1], 'action': actions, 'reward': reward})
+
             return state, reward, False, {}
 
     def get_sb_env(self):
